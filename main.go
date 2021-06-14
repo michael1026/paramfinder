@@ -7,10 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -31,14 +33,20 @@ func main() {
 	wg := &sync.WaitGroup{}
 	client := buildHttpClient()
 	results := ArjunResults{}
-	var outputFile = flag.String("o", "", "File to output results to (.json)")
+	outputFile := flag.String("o", "", "File to output results to (.json)")
+	wordlistFile := flag.String("w", "", "Wordlist file")
+	var wordlist []string
 	flag.Parse()
+
+	if *wordlistFile != "" {
+		wordlist, _ = readWordlistIntoFile(*wordlistFile)
+	}
 
 	s := bufio.NewScanner(os.Stdin)
 	for s.Scan() {
 		wg.Add(1)
 		time.Sleep(100 * time.Millisecond)
-		go findParameters(s.Text(), client, wg, &results)
+		go findParameters(s.Text(), &wordlist, client, wg, &results)
 	}
 
 	wg.Wait()
@@ -52,7 +60,30 @@ func main() {
 	err = ioutil.WriteFile(*outputFile, resultJson, 0644)
 }
 
-func findParameters(rawUrl string, client *http.Client, wg *sync.WaitGroup, results *ArjunResults) {
+func readLines(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	return lines, scanner.Err()
+}
+
+func readWordlistIntoFile(wordlistPath string) ([]string, error) {
+	lines, err := readLines(wordlistPath)
+	if err != nil {
+		log.Fatalf("readLines: %s", err)
+	}
+	return lines, err
+}
+
+func findParameters(rawUrl string, wordlist *[]string, client *http.Client, wg *sync.WaitGroup, results *ArjunResults) {
 	defer wg.Done()
 
 	canary := "wrtqva"
@@ -66,16 +97,14 @@ func findParameters(rawUrl string, client *http.Client, wg *sync.WaitGroup, resu
 	query.Set(randSeq(4), canary)
 	originalTestUrl.RawQuery = query.Encode()
 
-	doc, err := getDocFromURL(rawUrl, client)
+	doc, err := getDocFromURL(originalTestUrl.String(), client)
 
 	if err == nil && doc != nil {
 		canaryCount := countReflections(doc, canary)
-		potentialParameters := findPotentialParameters(doc)
+		potentialParameters := findPotentialParameters(doc, wordlist)
 		confirmParameters(client, rawUrl, potentialParameters, canaryCount, results)
 	} else if err != nil {
 		fmt.Printf("error with doc: %s\n", err)
-	} else {
-		fmt.Printf("no doc\n")
 	}
 }
 
@@ -132,6 +161,8 @@ func confirmParameters(client *http.Client, rawUrl string, potentialParameters *
 		if err == nil && doc != nil {
 			found := checkDocForReflections(doc, potentialParameters, canaryCount)
 			if len(found) > 0 {
+				oldFinds := (*results)[rawUrl]
+				found = append(oldFinds.Params, found...)
 				(*results)[rawUrl] = ArjunResult{Params: found}
 			}
 		}
@@ -141,14 +172,14 @@ func confirmParameters(client *http.Client, rawUrl string, potentialParameters *
 func checkDocForReflections(doc *goquery.Document, potentialParameters *map[string]string, canaryCount int) []string {
 	var foundParameters []string
 	for param, value := range *potentialParameters {
-		if countReflections(doc, value) != canaryCount {
-			foundParameters = append(foundParameters, param)
+		if countReflections(doc, value) > canaryCount {
+			foundParameters = appendIfMissing(foundParameters, param)
 		}
 	}
 	return foundParameters
 }
 
-func countReflections(doc *goquery.Document, canary string) (c int) {
+func countReflections(doc *goquery.Document, canary string) int {
 	html, err := doc.Html()
 
 	if err != nil {
@@ -194,7 +225,7 @@ func splitParametersIntoQueryStrings(rawUrl string, parameters *map[string]strin
 	return urls
 }
 
-func findPotentialParameters(doc *goquery.Document) *map[string]string {
+func findPotentialParameters(doc *goquery.Document, wordlist *[]string) *map[string]string {
 	parameters := make(map[string]string)
 	canary := "wrtqva"
 	doc.Find("input").Each(func(index int, item *goquery.Selection) {
@@ -203,6 +234,12 @@ func findPotentialParameters(doc *goquery.Document) *map[string]string {
 			parameters[name] = canary + randSeq(5)
 		}
 	})
+
+	wordlist = keywordsFromRegex(doc, wordlist)
+
+	for _, word := range *wordlist {
+		parameters[word] = canary + randSeq(5)
+	}
 
 	return &parameters
 }
@@ -243,4 +280,40 @@ func randSeq(n int) string {
 		b[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(b)
+}
+
+func keywordsFromRegex(doc *goquery.Document, wordlist *[]string) *[]string {
+	html, err := doc.Html()
+	var newWordlist []string
+
+	if err != nil {
+		fmt.Printf("Error reading doc: %s\n", err)
+	}
+
+	regexs := [...]string{"\"[a-z_\\-]+\":", "[a-z_\\-]+:(\\d|{|\"|\\s)"}
+
+	for _, regex := range regexs {
+		re := regexp.MustCompile(regex)
+		matches := re.FindStringSubmatch(html)
+
+		for _, match := range matches {
+			match = strings.ReplaceAll(match, "\"", "")
+			match = strings.ReplaceAll(match, "{", "")
+			match = strings.ReplaceAll(match, ":", "")
+			match = strings.ReplaceAll(match, " ", "")
+
+			newWordlist = appendIfMissing(*wordlist, match)
+		}
+	}
+
+	return &newWordlist
+}
+
+func appendIfMissing(slice []string, s string) []string {
+	for _, ele := range slice {
+		if ele == s {
+			return slice
+		}
+	}
+	return append(slice, s)
 }
