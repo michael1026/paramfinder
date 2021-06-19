@@ -10,9 +10,11 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,33 +23,55 @@ import (
 	"github.com/projectdiscovery/fastdialer/fastdialer"
 )
 
+type CookieInfo map[string]string
+
 type ArjunResult struct {
 	Params []string `json:"params"`
 }
 
 type ArjunResults map[string]ArjunResult
 
+type HeaderArgs []string
+
+func (h *HeaderArgs) Set(val string) error {
+	*h = append(*h, val)
+	return nil
+}
+
+func (h HeaderArgs) String() string {
+	return "string"
+}
+
 var letters = []rune("abcdefghijklmnopqrstuvwxyz")
 
 func main() {
 	wg := &sync.WaitGroup{}
-	client := buildHttpClient()
 	results := ArjunResults{}
 	outputFile := flag.String("o", "", "File to output results to (.json)")
 	wordlistFile := flag.String("w", "", "Wordlist file")
+	cookieFile := flag.String("C", "", "File containing cookie")
+	var headers HeaderArgs
+	flag.Var(&headers, "H", "")
 	var wordlist []string
+
 	flag.Parse()
 
 	if *wordlistFile != "" {
 		wordlist, _ = readWordlistIntoFile(*wordlistFile)
 	}
 
+	jar := readCookieJson(*cookieFile)
+	client := buildHttpClient(jar)
+
 	s := bufio.NewScanner(os.Stdin)
+	count := 0
 	for s.Scan() {
+		count++
 		wg.Add(1)
 		time.Sleep(100 * time.Millisecond)
-		go findParameters(s.Text(), &wordlist, client, wg, &results)
+		go findParameters(s.Text(), &wordlist, client, wg, &results, &headers)
 	}
+	// bar := pb.StartNew(count)
 
 	wg.Wait()
 
@@ -83,7 +107,7 @@ func readWordlistIntoFile(wordlistPath string) ([]string, error) {
 	return lines, err
 }
 
-func findParameters(rawUrl string, wordlist *[]string, client *http.Client, wg *sync.WaitGroup, results *ArjunResults) {
+func findParameters(rawUrl string, wordlist *[]string, client *http.Client, wg *sync.WaitGroup, results *ArjunResults, headers *HeaderArgs) {
 	defer wg.Done()
 
 	canary := "wrtqva"
@@ -97,24 +121,34 @@ func findParameters(rawUrl string, wordlist *[]string, client *http.Client, wg *
 	query.Set(randSeq(4), canary)
 	originalTestUrl.RawQuery = query.Encode()
 
-	doc, err := getDocFromURL(originalTestUrl.String(), client)
+	doc, err := getDocFromURL(originalTestUrl.String(), client, headers)
 
 	if err == nil && doc != nil {
 		canaryCount := countReflections(doc, canary)
 		potentialParameters := findPotentialParameters(doc, wordlist)
-		confirmParameters(client, rawUrl, potentialParameters, canaryCount, results)
+		confirmParameters(client, rawUrl, potentialParameters, canaryCount, results, headers)
 	} else if err != nil {
 		fmt.Printf("error with doc: %s\n", err)
 	}
 }
 
-func getDocFromURL(rawUrl string, client *http.Client) (*goquery.Document, error) {
+func getDocFromURL(rawUrl string, client *http.Client, headers *HeaderArgs) (*goquery.Document, error) {
 	req, err := http.NewRequest("GET", rawUrl, nil)
+
 	if err != nil {
 		fmt.Printf("Error creating request: %s\n", err)
 		return nil, err
 	}
 	req.Header.Set("Connection", "close")
+
+	for _, h := range *headers {
+		parts := strings.SplitN(h, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		req.Header.Set(parts[0], parts[1])
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -137,7 +171,7 @@ func getDocFromURL(rawUrl string, client *http.Client) (*goquery.Document, error
 	return nil, nil
 }
 
-func confirmParameters(client *http.Client, rawUrl string, potentialParameters *map[string]string, canaryCount int, results *ArjunResults) {
+func confirmParameters(client *http.Client, rawUrl string, potentialParameters *map[string]string, canaryCount int, results *ArjunResults, headers *HeaderArgs) {
 	req, err := http.NewRequest("GET", rawUrl, nil)
 	if err != nil {
 		fmt.Printf("Error creating request: %s\n", err)
@@ -156,7 +190,7 @@ func confirmParameters(client *http.Client, rawUrl string, potentialParameters *
 	queryStrings := splitParametersIntoQueryStrings(rawUrl, potentialParameters)
 
 	for _, parsedUrl := range queryStrings {
-		doc, err := getDocFromURL(parsedUrl.String(), client)
+		doc, err := getDocFromURL(parsedUrl.String(), client, headers)
 
 		if err == nil && doc != nil {
 			found := checkDocForReflections(doc, potentialParameters, canaryCount)
@@ -190,7 +224,7 @@ func countReflections(doc *goquery.Document, canary string) int {
 }
 
 func splitParametersIntoQueryStrings(rawUrl string, parameters *map[string]string) (urls []url.URL) {
-	size := 40
+	size := 160
 	i := 0
 	parsedUrl, err := url.Parse(rawUrl)
 
@@ -244,17 +278,16 @@ func findPotentialParameters(doc *goquery.Document, wordlist *[]string) *map[str
 	return &parameters
 }
 
-func buildHttpClient() (c *http.Client) {
+func buildHttpClient(jar *cookiejar.Jar) (c *http.Client) {
 	fastdialerOpts := fastdialer.DefaultOptions
 	fastdialerOpts.EnableFallback = true
 	dialer, err := fastdialer.NewDialer(fastdialerOpts)
 	if err != nil {
-		fmt.Printf("Error initializing dialer: %s\n", err)
 		return
 	}
 
 	transport := &http.Transport{
-		MaxIdleConns:      -1,
+		MaxIdleConns:      100,
 		IdleConnTimeout:   time.Second,
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 		DisableKeepAlives: true,
@@ -269,6 +302,7 @@ func buildHttpClient() (c *http.Client) {
 		Transport:     transport,
 		CheckRedirect: re,
 		Timeout:       time.Second * 10,
+		Jar:           jar,
 	}
 
 	return client
@@ -302,7 +336,9 @@ func keywordsFromRegex(doc *goquery.Document, wordlist *[]string) *[]string {
 			match = strings.ReplaceAll(match, ":", "")
 			match = strings.ReplaceAll(match, " ", "")
 
-			newWordlist = appendIfMissing(*wordlist, match)
+			if match != "" {
+				newWordlist = appendIfMissing(*wordlist, match)
+			}
 		}
 	}
 
@@ -316,4 +352,141 @@ func appendIfMissing(slice []string, s string) []string {
 		}
 	}
 	return append(slice, s)
+}
+
+func readCookiesFromString(s string) []*http.Cookie {
+	cookieStrings := strings.Split(s, ";")
+
+	for i, c := range cookieStrings {
+		cookieStrings[i] = strings.TrimSpace(c)
+	}
+
+	cookieCount := len(cookieStrings)
+	if cookieCount == 0 {
+		return []*http.Cookie{}
+	}
+	cookies := make([]*http.Cookie, 0, cookieCount)
+	for _, line := range cookieStrings {
+		parts := strings.Split(strings.TrimSpace(line), ";")
+		if len(parts) == 1 && parts[0] == "" {
+			continue
+		}
+		parts[0] = strings.TrimSpace(parts[0])
+		j := strings.Index(parts[0], "=")
+		if j < 0 {
+			continue
+		}
+		name, value := parts[0][:j], parts[0][j+1:]
+
+		value, ok := parseCookieValue(value, true)
+		if !ok {
+			continue
+		}
+		c := &http.Cookie{
+			Name:  name,
+			Value: value,
+			Raw:   line,
+		}
+		for i := 1; i < len(parts); i++ {
+			parts[i] = strings.TrimSpace(parts[i])
+			if len(parts[i]) == 0 {
+				continue
+			}
+
+			attr, val := parts[i], ""
+			if j := strings.Index(attr, "="); j >= 0 {
+				attr, val = attr[:j], attr[j+1:]
+			}
+			lowerAttr := strings.ToLower(attr)
+			val, ok = parseCookieValue(val, false)
+			if !ok {
+				c.Unparsed = append(c.Unparsed, parts[i])
+				continue
+			}
+			switch lowerAttr {
+			case "secure":
+				c.Secure = true
+				continue
+			case "httponly":
+				c.HttpOnly = true
+				continue
+			case "domain":
+				c.Domain = val
+				continue
+			case "max-age":
+				secs, err := strconv.Atoi(val)
+				if err != nil || secs != 0 && val[0] == '0' {
+					break
+				}
+				if secs <= 0 {
+					secs = -1
+				}
+				c.MaxAge = secs
+				continue
+			case "expires":
+				c.RawExpires = val
+				exptime, err := time.Parse(time.RFC1123, val)
+				if err != nil {
+					exptime, err = time.Parse("Mon, 02-Jan-2006 15:04:05 MST", val)
+					if err != nil {
+						c.Expires = time.Time{}
+						break
+					}
+				}
+				c.Expires = exptime.UTC()
+				continue
+			case "path":
+				c.Path = val
+				continue
+			}
+			c.Unparsed = append(c.Unparsed, parts[i])
+		}
+		cookies = append(cookies, c)
+	}
+	return cookies
+}
+
+func parseCookieValue(raw string, allowDoubleQuote bool) (string, bool) {
+	// Strip the quotes, if present.
+	if allowDoubleQuote && len(raw) > 1 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		raw = raw[1 : len(raw)-1]
+	}
+	return raw, true
+}
+
+func readCookieJson(filepath string) *cookiejar.Jar {
+	jar, err := cookiejar.New(nil)
+
+	if err != nil {
+		log.Fatal("Error reading cookie file")
+	}
+
+	if filepath == "" {
+
+		return jar
+	}
+	cookieFile, err := os.Open(filepath)
+	var cookies CookieInfo
+
+	if err != nil {
+		log.Fatal("Error creating cookie jar")
+	}
+
+	defer cookieFile.Close()
+
+	bytes, _ := ioutil.ReadAll(cookieFile)
+
+	json.Unmarshal(bytes, &cookies)
+
+	for rawUrl, cookieString := range cookies {
+		parsedUrl, err := url.Parse(rawUrl)
+
+		if err != nil {
+			continue
+		}
+
+		jar.SetCookies(parsedUrl, readCookiesFromString(cookieString))
+	}
+
+	return jar
 }
