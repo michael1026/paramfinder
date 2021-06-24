@@ -48,8 +48,13 @@ func main() {
 	wg := &sync.WaitGroup{}
 	results := ArjunResults{}
 	outputFile := flag.String("o", "", "File to output results to (.json)")
+
 	wordlistFile := flag.String("w", "", "Wordlist file")
+
 	cookieFile := flag.String("C", "", "File containing cookie")
+
+	threads := flag.Int("t", 20, "set the concurrency level (split equally between HTTPS and HTTP requests)")
+
 	var headers HeaderArgs
 	flag.Var(&headers, "H", "")
 	var wordlist []string
@@ -62,16 +67,21 @@ func main() {
 
 	jar := readCookieJson(*cookieFile)
 	client := buildHttpClient(jar)
+	urls := make(chan string)
 
 	s := bufio.NewScanner(os.Stdin)
-	count := 0
-	for s.Scan() {
-		count++
+
+	for i := 0; i < *threads; i++ {
 		wg.Add(1)
-		time.Sleep(100 * time.Millisecond)
-		go findParameters(s.Text(), &wordlist, client, wg, &results, &headers)
+
+		go findParameters(urls, &wordlist, client, wg, &results, &headers)
 	}
-	// bar := pb.StartNew(count)
+
+	for s.Scan() {
+		urls <- s.Text()
+	}
+
+	close(urls)
 
 	wg.Wait()
 
@@ -107,28 +117,31 @@ func readWordlistIntoFile(wordlistPath string) ([]string, error) {
 	return lines, err
 }
 
-func findParameters(rawUrl string, wordlist *[]string, client *http.Client, wg *sync.WaitGroup, results *ArjunResults, headers *HeaderArgs) {
+func findParameters(urls chan string, wordlist *[]string, client *http.Client, wg *sync.WaitGroup, results *ArjunResults, headers *HeaderArgs) {
 	defer wg.Done()
 
 	canary := "wrtqva"
-	originalTestUrl, err := url.Parse(rawUrl)
 
-	if err != nil {
-		fmt.Printf("Error parsing URL: %s\n", err)
-	}
+	for rawUrl := range urls {
+		originalTestUrl, err := url.Parse(rawUrl)
 
-	query := originalTestUrl.Query()
-	query.Set(randSeq(4), canary)
-	originalTestUrl.RawQuery = query.Encode()
+		if err != nil {
+			fmt.Printf("Error parsing URL: %s\n", err)
+		}
 
-	doc, err := getDocFromURL(originalTestUrl.String(), client, headers)
+		query := originalTestUrl.Query()
+		query.Set(randSeq(4), canary)
+		originalTestUrl.RawQuery = query.Encode()
 
-	if err == nil && doc != nil {
-		canaryCount := countReflections(doc, canary)
-		potentialParameters := findPotentialParameters(doc, wordlist)
-		confirmParameters(client, rawUrl, potentialParameters, canaryCount, results, headers)
-	} else if err != nil {
-		fmt.Printf("error with doc: %s\n", err)
+		doc, err := getDocFromURL(originalTestUrl.String(), client, headers)
+
+		if err == nil && doc != nil {
+			canaryCount := countReflections(doc, canary)
+			potentialParameters := findPotentialParameters(doc, wordlist)
+			confirmParameters(client, rawUrl, potentialParameters, canaryCount, results, headers)
+		} else if err != nil {
+			fmt.Printf("error with doc: %s\n", err)
+		}
 	}
 }
 
@@ -288,7 +301,7 @@ func buildHttpClient(jar *cookiejar.Jar) (c *http.Client) {
 
 	transport := &http.Transport{
 		MaxIdleConns:      100,
-		IdleConnTimeout:   time.Second,
+		IdleConnTimeout:   time.Second * 10,
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 		DisableKeepAlives: true,
 		DialContext:       dialer.Dial,
