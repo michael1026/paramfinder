@@ -2,49 +2,38 @@ package main
 
 import (
 	"bufio"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
-	"time"
+
+	"github.com/michael1026/paramfinder/reflectedscanner"
+	"github.com/michael1026/paramfinder/scanhttp"
+	"github.com/michael1026/paramfinder/types/scan"
+	"github.com/michael1026/paramfinder/util"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/michael1026/sessionManager"
-	"github.com/projectdiscovery/fastdialer/fastdialer"
 )
 
-type ArjunResult struct {
-	Params []string `json:"params"`
-}
-
-type ArjunResults map[string]ArjunResult
-
-type HeaderArgs []string
-
-func (h *HeaderArgs) Set(val string) error {
-	*h = append(*h, val)
-	return nil
-}
-
-func (h HeaderArgs) String() string {
-	return "string"
-}
-
-var letters = []rune("abcdefghijklmnopqrstuvwxyz")
+/***************************************
+* Ideas....
+* Break into different detection types (reflected, extra headers, number of each tag, etc) - Reflected done
+* Check stability of each detection type for each URL - Done
+* Ability to disable certain checks
+* Check max URL length for each host
+/***************************************/
 
 func main() {
 	wg := &sync.WaitGroup{}
-	results := ArjunResults{}
+	scanInfo := scan.Scan{}
 	outputFile := flag.String("o", "", "File to output results to (.json)")
 
 	wordlistFile := flag.String("w", "", "Wordlist file")
@@ -53,18 +42,19 @@ func main() {
 
 	threads := flag.Int("t", 20, "set the concurrency level (split equally between HTTPS and HTTP requests)")
 
-	var headers HeaderArgs
-	flag.Var(&headers, "H", "")
 	var wordlist []string
 
 	flag.Parse()
 
 	if *wordlistFile != "" {
 		wordlist, _ = readWordlistIntoFile(*wordlistFile)
+		scanInfo.WordList = wordlist
 	}
 
 	jar := sessionManager.ReadCookieJson(*cookieFile)
-	client := buildHttpClient(jar)
+	client := scanhttp.BuildHttpClient(jar)
+	scanInfo.ScanResults = make(scan.ScanResults)
+	scanInfo.JsonResults = make(scan.JsonResults)
 	urls := make(chan string)
 
 	s := bufio.NewScanner(os.Stdin)
@@ -72,7 +62,7 @@ func main() {
 	for i := 0; i < *threads; i++ {
 		wg.Add(1)
 
-		go findParameters(urls, &wordlist, client, wg, &results, &headers)
+		go findParameters(urls, &wordlist, client, wg, &scanInfo)
 	}
 
 	for s.Scan() {
@@ -83,7 +73,7 @@ func main() {
 
 	wg.Wait()
 
-	resultJson, err := json.Marshal(results)
+	resultJson, err := json.Marshal(scanInfo.JsonResults)
 
 	if err != nil {
 		fmt.Printf("Error marsheling json: %s\n", err)
@@ -115,127 +105,103 @@ func readWordlistIntoFile(wordlistPath string) ([]string, error) {
 	return lines, err
 }
 
-func findParameters(urls chan string, wordlist *[]string, client *http.Client, wg *sync.WaitGroup, results *ArjunResults, headers *HeaderArgs) {
+func findParameters(urls chan string, wordlist *[]string, client *http.Client, wg *sync.WaitGroup, scanInfo *scan.Scan) {
 	defer wg.Done()
 
 	canary := "wrtqva"
 
 	for rawUrl := range urls {
-		originalTestUrl, err := url.Parse(rawUrl)
+		scanInfo.ScanResults[rawUrl] = &scan.URLInfo{}
+		scanInfo.JsonResults[rawUrl] = scan.JsonResult{}
 
-		if err != nil {
-			fmt.Printf("Error parsing URL: %s\n", err)
+		urlInfo := scanInfo.ScanResults[rawUrl]
+		urlInfo.ReflectedScan = &scan.ReflectedScan{}
+
+		for i := 0; i < 5; i++ {
+			originalTestUrl, err := url.Parse(rawUrl)
+
+			if err != nil {
+				fmt.Printf("Error parsing URL: %s\n", err)
+			}
+
+			query := originalTestUrl.Query()
+			query.Set(util.RandSeq(4), canary)
+			originalTestUrl.RawQuery = query.Encode()
+
+			doc, err := scanhttp.GetDocFromURL(originalTestUrl.String(), client)
+
+			if err == nil && doc != nil {
+				if i == 0 {
+					reflectedscanner.PrepareScan(canary, doc, urlInfo.ReflectedScan)
+					urlInfo.PotentialParameters = findPotentialParameters(doc, wordlist)
+				} else if urlInfo.ReflectedScan.Stable {
+					reflectedscanner.CheckStability(&canary, doc, urlInfo.ReflectedScan)
+				}
+			}
 		}
-
-		query := originalTestUrl.Query()
-		query.Set(randSeq(4), canary)
-		originalTestUrl.RawQuery = query.Encode()
-
-		doc, err := getDocFromURL(originalTestUrl.String(), client, headers)
-
-		if err == nil && doc != nil {
-			canaryCount := countReflections(doc, canary)
-			potentialParameters := findPotentialParameters(doc, wordlist)
-			confirmParameters(client, rawUrl, potentialParameters, canaryCount, results, headers)
-		} else if err != nil {
-			fmt.Printf("error with doc: %s\n", err)
-		}
+		confirmParameters(client, rawUrl, scanInfo)
 	}
 }
 
-func getDocFromURL(rawUrl string, client *http.Client, headers *HeaderArgs) (*goquery.Document, error) {
-	req, err := http.NewRequest("GET", rawUrl, nil)
+/**********************************************************************************
+*
+* Make requests, then check page responses to determine if params affected the page
+*
+***********************************************************************************/
 
+func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) {
+	req, err := http.NewRequest("GET", rawUrl, nil)
 	if err != nil {
 		fmt.Printf("Error creating request: %s\n", err)
-		return nil, err
+		return
 	}
 	req.Header.Set("Connection", "close")
 
-	for _, h := range *headers {
-		parts := strings.SplitN(h, ":", 2)
-		if len(parts) != 2 {
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error executing request: %s\n", err)
+		return
+	}
+
+	defer resp.Body.Close()
+
+	queryStrings := splitParametersIntoQueryStrings(rawUrl, &scanInfo.ScanResults[rawUrl].PotentialParameters)
+
+	for _, parsedUrl := range queryStrings {
+		if scanInfo.ScanResults[rawUrl].ReflectedScan.Stable == false {
+			fmt.Printf("URL %s is unstable\n", rawUrl)
 			continue
 		}
 
-		req.Header.Set(parts[0], parts[1])
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("Error executing request: %s\n", err)
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusOK && len(resp.Header.Get("content-type")) >= 9 && resp.Header.Get("content-type")[:9] == "text/html" {
-		doc, err := goquery.NewDocumentFromReader(resp.Body)
+		doc, err := scanhttp.GetDocFromURL(parsedUrl.String(), client)
 
 		if err != nil {
-			fmt.Printf("Error reading doc: %s\n", err)
-			return nil, err
+			fmt.Printf("Error creating document %s\n", err)
+			continue
 		}
 
-		return doc, nil
-	}
+		if doc != nil {
+			reflectedscanner.CheckDocForReflections(doc, rawUrl, scanInfo.ScanResults[rawUrl])
 
-	return nil, nil
-}
+			found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
 
-func confirmParameters(client *http.Client, rawUrl string, potentialParameters *map[string]string, canaryCount int, results *ArjunResults, headers *HeaderArgs) {
-	req, err := http.NewRequest("GET", rawUrl, nil)
-	if err != nil {
-		fmt.Printf("Error creating request: %s\n", err)
-		return
-	}
-	req.Header.Set("Connection", "close")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("Error executing request: %s\n", err)
-		return
-	}
-
-	defer resp.Body.Close()
-
-	queryStrings := splitParametersIntoQueryStrings(rawUrl, potentialParameters)
-
-	for _, parsedUrl := range queryStrings {
-		doc, err := getDocFromURL(parsedUrl.String(), client, headers)
-
-		if err == nil && doc != nil {
-			found := checkDocForReflections(doc, potentialParameters, canaryCount)
 			if len(found) > 0 {
-				oldFinds := (*results)[rawUrl]
+				oldFinds := (scanInfo.JsonResults)[rawUrl]
 				found = append(oldFinds.Params, found...)
-				(*results)[rawUrl] = ArjunResult{Params: found}
+				scanInfo.JsonResults[rawUrl] = scan.JsonResult{Params: found}
 			}
 		}
 	}
 }
 
-func checkDocForReflections(doc *goquery.Document, potentialParameters *map[string]string, canaryCount int) []string {
-	var foundParameters []string
-	for param, value := range *potentialParameters {
-		if countReflections(doc, value) > canaryCount {
-			foundParameters = appendIfMissing(foundParameters, param)
-		}
-	}
-	return foundParameters
-}
-
-func countReflections(doc *goquery.Document, canary string) int {
-	html, err := doc.Html()
-
-	if err != nil {
-		fmt.Printf("Error converting to HTML: %s\n", err)
-	}
-
-	return strings.Count(html, canary)
-}
+/************************************************************************
+*
+* Splits parameter list into multiple query strings based on size
+*
+*************************************************************************/
 
 func splitParametersIntoQueryStrings(rawUrl string, parameters *map[string]string) (urls []url.URL) {
-	size := 160
+	size := 80
 	i := 0
 	parsedUrl, err := url.Parse(rawUrl)
 
@@ -270,62 +236,36 @@ func splitParametersIntoQueryStrings(rawUrl string, parameters *map[string]strin
 	return urls
 }
 
-func findPotentialParameters(doc *goquery.Document, wordlist *[]string) *map[string]string {
+/***********************************************************************
+*
+* Used to find possible parameter names by looking at the page source
+*
+************************************************************************/
+
+func findPotentialParameters(doc *goquery.Document, wordlist *[]string) map[string]string {
 	parameters := make(map[string]string)
 	canary := "wrtqva"
 	doc.Find("input").Each(func(index int, item *goquery.Selection) {
 		name, ok := item.Attr("name")
 		if ok && len(name) > 0 && len(name) < 12 {
-			parameters[name] = canary + randSeq(5)
+			parameters[name] = canary + util.RandSeq(5)
 		}
 	})
 
 	wordlist = keywordsFromRegex(doc, wordlist)
 
 	for _, word := range *wordlist {
-		parameters[word] = canary + randSeq(5)
+		parameters[word] = canary + util.RandSeq(5)
 	}
 
-	return &parameters
+	return parameters
 }
 
-func buildHttpClient(jar *cookiejar.Jar) (c *http.Client) {
-	fastdialerOpts := fastdialer.DefaultOptions
-	fastdialerOpts.EnableFallback = true
-	dialer, err := fastdialer.NewDialer(fastdialerOpts)
-	if err != nil {
-		return
-	}
-
-	transport := &http.Transport{
-		MaxIdleConns:      100,
-		IdleConnTimeout:   time.Second * 10,
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
-		DisableKeepAlives: true,
-		DialContext:       dialer.Dial,
-	}
-
-	re := func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-
-	client := &http.Client{
-		Transport:     transport,
-		CheckRedirect: re,
-		Timeout:       time.Second * 10,
-		Jar:           jar,
-	}
-
-	return client
-}
-
-func randSeq(n int) string {
-	b := make([]rune, n)
-	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
-	}
-	return string(b)
-}
+/***********************************************************************
+*
+* Finds keywords by using some regex against the page source
+*
+************************************************************************/
 
 func keywordsFromRegex(doc *goquery.Document, wordlist *[]string) *[]string {
 	html, err := doc.Html()
@@ -348,19 +288,10 @@ func keywordsFromRegex(doc *goquery.Document, wordlist *[]string) *[]string {
 			match = strings.ReplaceAll(match, " ", "")
 
 			if match != "" {
-				newWordlist = appendIfMissing(*wordlist, match)
+				newWordlist = util.AppendIfMissing(*wordlist, match)
 			}
 		}
 	}
 
 	return &newWordlist
-}
-
-func appendIfMissing(slice []string, s string) []string {
-	for _, ele := range slice {
-		if ele == s {
-			return slice
-		}
-	}
-	return append(slice, s)
 }
