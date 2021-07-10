@@ -32,17 +32,14 @@ import (
 /***************************************/
 
 func main() {
+	var wordlist []string
 	wg := &sync.WaitGroup{}
 	scanInfo := scan.Scan{}
+
 	outputFile := flag.String("o", "", "File to output results to (.json)")
-
 	wordlistFile := flag.String("w", "", "Wordlist file")
-
 	cookieFile := flag.String("C", "", "File containing cookie")
-
 	threads := flag.Int("t", 20, "set the concurrency level (split equally between HTTPS and HTTP requests)")
-
-	var wordlist []string
 
 	flag.Parse()
 
@@ -76,7 +73,7 @@ func main() {
 	resultJson, err := json.Marshal(scanInfo.JsonResults)
 
 	if err != nil {
-		fmt.Printf("Error marsheling json: %s\n", err)
+		log.Fatalf("Error marsheling json: %s\n", err)
 	}
 
 	err = ioutil.WriteFile(*outputFile, resultJson, 0644)
@@ -169,7 +166,7 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 
 	for _, parsedUrl := range queryStrings {
 		if scanInfo.ScanResults[rawUrl].ReflectedScan.Stable == false {
-			fmt.Printf("URL %s is unstable\n", rawUrl)
+			fmt.Printf("URL %s is unstable. Skipping\n", rawUrl)
 			continue
 		}
 
@@ -295,3 +292,5 @@ func keywordsFromRegex(doc *goquery.Document, wordlist *[]string) *[]string {
 
 	return &newWordlist
 }
+
+func calculateMaxParameters()
