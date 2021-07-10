@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -25,16 +24,19 @@ import (
 
 /***************************************
 * Ideas....
-* Break into different detection types (reflected, extra headers, number of each tag, etc) - Reflected done
+* Break into different detection types (reflected, extra headers, number of each tag, etc)
+* - Reflected done
 * Check stability of each detection type for each URL - Done
 * Ability to disable certain checks
-* Check max URL length for each host
+* Check max URL length for each host - Done
+* Write JSON as program runs
 /***************************************/
 
 func main() {
 	var wordlist []string
 	wg := &sync.WaitGroup{}
 	scanInfo := scan.Scan{}
+	scanInfo.FillDefaults()
 
 	outputFile := flag.String("o", "", "File to output results to (.json)")
 	wordlistFile := flag.String("w", "", "Wordlist file")
@@ -50,8 +52,6 @@ func main() {
 
 	jar := sessionManager.ReadCookieJson(*cookieFile)
 	client := scanhttp.BuildHttpClient(jar)
-	scanInfo.ScanResults = make(scan.ScanResults)
-	scanInfo.JsonResults = make(scan.JsonResults)
 	urls := make(chan string)
 
 	s := bufio.NewScanner(os.Stdin)
@@ -70,7 +70,7 @@ func main() {
 
 	wg.Wait()
 
-	resultJson, err := json.Marshal(scanInfo.JsonResults)
+	resultJson, err := util.JSONMarshal(scanInfo.JsonResults)
 
 	if err != nil {
 		log.Fatalf("Error marsheling json: %s\n", err)
@@ -108,8 +108,9 @@ func findParameters(urls chan string, wordlist *[]string, client *http.Client, w
 	canary := "wrtqva"
 
 	for rawUrl := range urls {
+		scanInfo.ScanResultsMutex.Lock()
 		scanInfo.ScanResults[rawUrl] = &scan.URLInfo{}
-		scanInfo.JsonResults[rawUrl] = scan.JsonResult{}
+		scanInfo.ScanResultsMutex.Unlock()
 
 		urlInfo := scanInfo.ScanResults[rawUrl]
 		urlInfo.ReflectedScan = &scan.ReflectedScan{}
@@ -136,6 +137,7 @@ func findParameters(urls chan string, wordlist *[]string, client *http.Client, w
 				}
 			}
 		}
+		calculateMaxParameters(scanInfo.ScanResults[rawUrl], client, rawUrl)
 		confirmParameters(client, rawUrl, scanInfo)
 	}
 }
@@ -162,7 +164,7 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 
 	defer resp.Body.Close()
 
-	queryStrings := splitParametersIntoQueryStrings(rawUrl, &scanInfo.ScanResults[rawUrl].PotentialParameters)
+	queryStrings := splitParametersIntoQueryStrings(rawUrl, &scanInfo.ScanResults[rawUrl].PotentialParameters, scanInfo.ScanResults[rawUrl].MaxParams)
 
 	for _, parsedUrl := range queryStrings {
 		if scanInfo.ScanResults[rawUrl].ReflectedScan.Stable == false {
@@ -197,8 +199,7 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 *
 *************************************************************************/
 
-func splitParametersIntoQueryStrings(rawUrl string, parameters *map[string]string) (urls []url.URL) {
-	size := 80
+func splitParametersIntoQueryStrings(rawUrl string, parameters *map[string]string, maxParams int) (urls []url.URL) {
 	i := 0
 	parsedUrl, err := url.Parse(rawUrl)
 
@@ -217,7 +218,7 @@ func splitParametersIntoQueryStrings(rawUrl string, parameters *map[string]strin
 	query := parsedUrl.Query()
 
 	for name, value := range *parameters {
-		if i == size {
+		if i == maxParams {
 			i = 0
 			urlWithQuery.RawQuery = query.Encode()
 			urls = append(urls, *urlWithQuery)
@@ -293,4 +294,59 @@ func keywordsFromRegex(doc *goquery.Document, wordlist *[]string) *[]string {
 	return &newWordlist
 }
 
-func calculateMaxParameters()
+/***********************************************************************
+*
+* Calculates the max number of parameters before the page breaks
+*
+************************************************************************/
+
+func calculateMaxParameters(scanInfo *scan.URLInfo, client *http.Client, rawUrl string) {
+	maxParameters := 50
+	parsedUrl, err := url.Parse(rawUrl)
+
+	if err != nil {
+		fmt.Printf("Error parsing URL: %s\n", err)
+		return
+	}
+
+	req, err := http.NewRequest("GET", rawUrl, nil)
+
+	if err != nil {
+		fmt.Printf("Error creating request: %s\n", err)
+		return
+	}
+	req.Header.Set("Connection", "close")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Error executing request: %s\n", err)
+		return
+	}
+
+	resp.Body.Close()
+
+	query := parsedUrl.Query()
+
+	for i := 0; i < 50; i++ {
+		query.Set(util.RandSeq(7), util.RandSeq(7))
+	}
+
+	for i := 0; i < 30; i++ {
+		for i := 0; i < 50; i++ {
+			query.Set(util.RandSeq(10), util.RandSeq(10))
+		}
+
+		req.URL.RawQuery = query.Encode()
+
+		resp, err = client.Do(req)
+
+		if err != nil || resp.StatusCode != http.StatusOK {
+			scanInfo.MaxParams = maxParameters
+			return
+		}
+
+		maxParameters += 50
+	}
+
+	scanInfo.MaxParams = 1500
+}

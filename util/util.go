@@ -1,6 +1,10 @@
 package util
 
-import "math/rand"
+import (
+	"bytes"
+	"encoding/json"
+	"math/rand"
+)
 
 var letters = []rune("abcdefghijklmnopqrstuvwxyz")
 
@@ -19,4 +23,12 @@ func RandSeq(n int) string {
 		b[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(b)
+}
+
+func JSONMarshal(t interface{}) ([]byte, error) {
+	buffer := &bytes.Buffer{}
+	encoder := json.NewEncoder(buffer)
+	encoder.SetEscapeHTML(false)
+	err := encoder.Encode(t)
+	return buffer.Bytes(), err
 }
