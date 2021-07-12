@@ -1,7 +1,5 @@
 package scan
 
-import "sync"
-
 type ReflectedScan struct {
 	Stable          bool
 	CanaryCount     int
@@ -18,11 +16,10 @@ type URLInfo struct {
 type ScanResults map[string]*URLInfo
 
 type Scan struct {
-	ScanResults      ScanResults
-	ScanResultsMutex sync.RWMutex
-	WordList         []string
-	JsonResults      JsonResults
-	JsonResultsMutex sync.RWMutex
+	ScanResults ScanResults
+	WordList    []string
+	JsonResults JsonResults
+	CanaryValue string
 }
 
 type JsonResult struct {
@@ -32,8 +29,6 @@ type JsonResult struct {
 type JsonResults map[string]JsonResult
 
 func (s *Scan) FillDefaults() {
-	s.JsonResultsMutex = sync.RWMutex{}
-	s.ScanResultsMutex = sync.RWMutex{}
 	s.ScanResults = make(ScanResults)
 	s.JsonResults = make(JsonResults)
 }

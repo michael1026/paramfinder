@@ -59,10 +59,11 @@ func main() {
 	for i := 0; i < *threads; i++ {
 		wg.Add(1)
 
-		go findParameters(urls, &wordlist, client, wg, &scanInfo)
+		go findParameters(urls, client, wg, &scanInfo)
 	}
 
 	for s.Scan() {
+		scanInfo.ScanResults[s.Text()] = &scan.URLInfo{}
 		urls <- s.Text()
 	}
 
@@ -102,16 +103,13 @@ func readWordlistIntoFile(wordlistPath string) ([]string, error) {
 	return lines, err
 }
 
-func findParameters(urls chan string, wordlist *[]string, client *http.Client, wg *sync.WaitGroup, scanInfo *scan.Scan) {
+func findParameters(urls chan string, client *http.Client, wg *sync.WaitGroup, scanInfo *scan.Scan) {
 	defer wg.Done()
 
 	canary := "wrtqva"
+	scanInfo.CanaryValue = util.RandSeq(6)
 
 	for rawUrl := range urls {
-		scanInfo.ScanResultsMutex.Lock()
-		scanInfo.ScanResults[rawUrl] = &scan.URLInfo{}
-		scanInfo.ScanResultsMutex.Unlock()
-
 		urlInfo := scanInfo.ScanResults[rawUrl]
 		urlInfo.ReflectedScan = &scan.ReflectedScan{}
 
@@ -123,7 +121,7 @@ func findParameters(urls chan string, wordlist *[]string, client *http.Client, w
 			}
 
 			query := originalTestUrl.Query()
-			query.Set(util.RandSeq(4), canary)
+			query.Set(util.RandSeq(6), canary)
 			originalTestUrl.RawQuery = query.Encode()
 
 			doc, err := scanhttp.GetDocFromURL(originalTestUrl.String(), client)
@@ -131,7 +129,7 @@ func findParameters(urls chan string, wordlist *[]string, client *http.Client, w
 			if err == nil && doc != nil {
 				if i == 0 {
 					reflectedscanner.PrepareScan(canary, doc, urlInfo.ReflectedScan)
-					urlInfo.PotentialParameters = findPotentialParameters(doc, wordlist)
+					urlInfo.PotentialParameters = findPotentialParameters(doc, &scanInfo.WordList)
 				} else if urlInfo.ReflectedScan.Stable {
 					reflectedscanner.CheckStability(&canary, doc, urlInfo.ReflectedScan)
 				}
@@ -164,13 +162,32 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 
 	defer resp.Body.Close()
 
-	queryStrings := splitParametersIntoQueryStrings(rawUrl, &scanInfo.ScanResults[rawUrl].PotentialParameters, scanInfo.ScanResults[rawUrl].MaxParams)
+	queryStrings :=
+		splitParametersIntoMaxSize(
+			rawUrl,
+			&scanInfo.ScanResults[rawUrl].PotentialParameters,
+			scanInfo.ScanResults[rawUrl].MaxParams,
+			scanInfo.CanaryValue)
 
-	for _, parsedUrl := range queryStrings {
+	for _, paramValues := range queryStrings {
 		if scanInfo.ScanResults[rawUrl].ReflectedScan.Stable == false {
 			fmt.Printf("URL %s is unstable. Skipping\n", rawUrl)
 			continue
 		}
+
+		parsedUrl, err := url.Parse(rawUrl)
+
+		if err != nil {
+			return
+		}
+
+		query := parsedUrl.Query()
+
+		for param, value := range paramValues {
+			query.Add(param, value)
+		}
+
+		parsedUrl.RawQuery = query.Encode()
 
 		doc, err := scanhttp.GetDocFromURL(parsedUrl.String(), client)
 
@@ -180,7 +197,7 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 		}
 
 		if doc != nil {
-			reflectedscanner.CheckDocForReflections(doc, rawUrl, scanInfo.ScanResults[rawUrl])
+			reflectedscanner.CheckDocForReflections(doc, scanInfo.ScanResults[rawUrl], scanInfo, paramValues, rawUrl)
 
 			found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
 
@@ -199,39 +216,26 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 *
 *************************************************************************/
 
-func splitParametersIntoQueryStrings(rawUrl string, parameters *map[string]string, maxParams int) (urls []url.URL) {
+func splitParametersIntoMaxSize(rawUrl string, parameters *map[string]string, maxParams int, canaryValue string) (splitParameters []map[string]string) {
 	i := 0
-	parsedUrl, err := url.Parse(rawUrl)
 
-	if err != nil {
-		fmt.Printf("Error parsing URL: %s\n", err)
-		return
-	}
-
-	urlWithQuery, err := url.Parse(rawUrl)
-
-	if err != nil {
-		fmt.Printf("Error parsing URL: %s\n", err)
-		return
-	}
-
-	query := parsedUrl.Query()
+	paramValues := make(map[string]string)
+	paramValues[util.RandSeq(6)] = canaryValue
 
 	for name, value := range *parameters {
 		if i == maxParams {
 			i = 0
-			urlWithQuery.RawQuery = query.Encode()
-			urls = append(urls, *urlWithQuery)
-			query = parsedUrl.Query()
+			splitParameters = append(splitParameters, paramValues)
+			paramValues = make(map[string]string)
+			paramValues[util.RandSeq(6)] = canaryValue
 		}
-		query.Set(name, value)
+		paramValues[name] = value
 		i++
 	}
 
-	urlWithQuery.RawQuery = query.Encode()
-	urls = append(urls, *urlWithQuery)
+	splitParameters = append(splitParameters, paramValues)
 
-	return urls
+	return splitParameters
 }
 
 /***********************************************************************
