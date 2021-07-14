@@ -96,7 +96,7 @@ func readLines(path string) ([]string, error) {
 	var lines []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
+		lines = util.AppendIfMissing(lines, scanner.Text())
 	}
 	return lines, scanner.Err()
 }
@@ -112,7 +112,7 @@ func readWordlistIntoFile(wordlistPath string) ([]string, error) {
 func findParameters(urls chan string, client *http.Client, wg *sync.WaitGroup, scanInfo *scan.Scan) {
 	defer wg.Done()
 
-	canary := "wrtqva"
+	canary := util.RandSeq(10)
 	scanInfo.CanaryValue = util.RandSeq(6)
 
 	for rawUrl := range urls {
@@ -219,14 +219,14 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 					for param := range paramValues {
 						found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
 						oldFinds := (scanInfo.JsonResults)[rawUrl]
-						found = append(oldFinds.Params, param)
+						found = util.AppendIfMissing(oldFinds.Params, param)
 						scanInfo.JsonResults[rawUrl] = scan.JsonResult{Params: found}
 						return []string{param}
 					}
+				} else if len(paramValues) > 0 {
+					extraParams := splitAndScan(paramValues, scanInfo, rawUrl, client)
+					foundParams = append(foundParams, extraParams...)
 				}
-
-				extraParams := splitAndScan(paramValues, scanInfo, rawUrl, client)
-				foundParams = append(foundParams, extraParams...)
 			}
 
 			found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
@@ -254,7 +254,7 @@ func splitAndScan(paramValues map[string]string, scanInfo *scan.Scan, rawUrl str
 		params := confirmParameters(client, rawUrl, &newScan)
 		if len(params) > 0 {
 			for _, param := range params {
-				foundParams = append(foundParams, param)
+				foundParams = util.AppendIfMissing(foundParams, param)
 			}
 		}
 	}
