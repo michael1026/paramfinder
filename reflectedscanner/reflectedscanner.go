@@ -29,12 +29,13 @@ func CheckDocForReflections(doc *goquery.Document, urlInfo *scan.URLInfo, scanIn
 		// this is probably caused by a parameter included in the request
 		// for now, we are going to ignore this URL, but in the future, I'd like to find the parameter that caused this
 
-		return false
+		return true
 	}
 
 	var foundParameters []string
 	for param, value := range paramValues {
 		counted := countReflections(doc, value)
+
 		if counted > urlInfo.ReflectedScan.CanaryCount {
 			foundParameters = util.AppendIfMissing(foundParameters, param)
 		}
@@ -51,7 +52,7 @@ func CheckDocForReflections(doc *goquery.Document, urlInfo *scan.URLInfo, scanIn
 		urlInfo.ReflectedScan.FoundParameters = foundParameters
 	}
 
-	return true
+	return false
 }
 
 func countReflections(doc *goquery.Document, canary string) int {

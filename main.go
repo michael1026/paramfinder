@@ -42,6 +42,7 @@ func main() {
 	wordlistFile := flag.String("w", "", "Wordlist file")
 	cookieFile := flag.String("C", "", "File containing cookie")
 	threads := flag.Int("t", 20, "set the concurrency level (split equally between HTTPS and HTTP requests)")
+	url := flag.String("u", "", "Single URL to scan")
 
 	flag.Parse()
 
@@ -60,6 +61,11 @@ func main() {
 		wg.Add(1)
 
 		go findParameters(urls, client, wg, &scanInfo)
+	}
+
+	if *url != "" {
+		scanInfo.ScanResults[*url] = &scan.URLInfo{}
+		urls <- *url
 	}
 
 	for s.Scan() {
@@ -136,7 +142,13 @@ func findParameters(urls chan string, client *http.Client, wg *sync.WaitGroup, s
 			}
 		}
 		calculateMaxParameters(scanInfo.ScanResults[rawUrl], client, rawUrl)
-		confirmParameters(client, rawUrl, scanInfo)
+		results := confirmParameters(client, rawUrl, scanInfo)
+
+		if len(results) > 0 {
+			oldFinds := (scanInfo.JsonResults)[rawUrl]
+			results = append(oldFinds.Params, results...)
+			scanInfo.JsonResults[rawUrl] = scan.JsonResult{Params: results}
+		}
 	}
 }
 
@@ -146,19 +158,21 @@ func findParameters(urls chan string, client *http.Client, wg *sync.WaitGroup, s
 *
 ***********************************************************************************/
 
-func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) {
+func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) []string {
 	req, err := http.NewRequest("GET", rawUrl, nil)
 	if err != nil {
 		fmt.Printf("Error creating request: %s\n", err)
-		return
+		return []string{}
 	}
 	req.Header.Set("Connection", "close")
 
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("Error executing request: %s\n", err)
-		return
+		return []string{}
 	}
+
+	foundParams := []string{}
 
 	defer resp.Body.Close()
 
@@ -178,7 +192,7 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 		parsedUrl, err := url.Parse(rawUrl)
 
 		if err != nil {
-			return
+			continue
 		}
 
 		query := parsedUrl.Query()
@@ -197,17 +211,55 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 		}
 
 		if doc != nil {
-			reflectedscanner.CheckDocForReflections(doc, scanInfo.ScanResults[rawUrl], scanInfo, paramValues, rawUrl)
+			pageDifferent := reflectedscanner.CheckDocForReflections(doc, scanInfo.ScanResults[rawUrl], scanInfo, paramValues, rawUrl)
+
+			if pageDifferent {
+				util.DeleteByKey(&paramValues, scanInfo.CanaryValue)
+				if len(paramValues) == 1 {
+					for param := range paramValues {
+						found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
+						oldFinds := (scanInfo.JsonResults)[rawUrl]
+						found = append(oldFinds.Params, param)
+						scanInfo.JsonResults[rawUrl] = scan.JsonResult{Params: found}
+						return []string{param}
+					}
+				}
+
+				extraParams := splitAndScan(paramValues, scanInfo, rawUrl, client)
+				foundParams = append(foundParams, extraParams...)
+			}
 
 			found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
+			foundParams = append(found, foundParams...)
+		}
+	}
 
-			if len(found) > 0 {
-				oldFinds := (scanInfo.JsonResults)[rawUrl]
-				found = append(oldFinds.Params, found...)
-				scanInfo.JsonResults[rawUrl] = scan.JsonResult{Params: found}
+	return foundParams
+}
+
+func splitAndScan(paramValues map[string]string, scanInfo *scan.Scan, rawUrl string, client *http.Client) (foundParams []string) {
+	split1, split2 := util.SplitMap(paramValues)
+	splits := []map[string]string{split1, split2}
+
+	for _, split := range splits {
+		newScan := scan.Scan{}
+		newScan.FillDefaults()
+		newScan.CanaryValue = scanInfo.CanaryValue
+		newScan.ScanResults[rawUrl] = &scan.URLInfo{}
+		newScan.ScanResults[rawUrl].ReflectedScan = &scan.ReflectedScan{}
+		newScan.ScanResults[rawUrl].ReflectedScan.CanaryCount = scanInfo.ScanResults[rawUrl].ReflectedScan.CanaryCount
+		newScan.ScanResults[rawUrl].ReflectedScan.Stable = true
+		newScan.ScanResults[rawUrl].PotentialParameters = split
+		newScan.ScanResults[rawUrl].ReflectedScan.FoundParameters = scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
+		params := confirmParameters(client, rawUrl, &newScan)
+		if len(params) > 0 {
+			for _, param := range params {
+				foundParams = append(foundParams, param)
 			}
 		}
 	}
+
+	return foundParams
 }
 
 /************************************************************************
@@ -249,7 +301,8 @@ func findPotentialParameters(doc *goquery.Document, wordlist *[]string) map[stri
 	canary := "wrtqva"
 	doc.Find("input").Each(func(index int, item *goquery.Selection) {
 		name, ok := item.Attr("name")
-		if ok && len(name) > 0 && len(name) < 12 {
+
+		if ok && len(name) > 0 && len(name) < 20 {
 			parameters[name] = canary + util.RandSeq(5)
 		}
 	})

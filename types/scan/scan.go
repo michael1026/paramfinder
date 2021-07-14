@@ -7,7 +7,6 @@ type ReflectedScan struct {
 }
 
 type URLInfo struct {
-	Params              []string `json:"params"`
 	ReflectedScan       *ReflectedScan
 	PotentialParameters map[string]string
 	MaxParams           int
