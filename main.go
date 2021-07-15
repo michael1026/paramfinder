@@ -298,19 +298,18 @@ func splitParametersIntoMaxSize(rawUrl string, parameters *map[string]string, ma
 
 func findPotentialParameters(doc *goquery.Document, wordlist *[]string) map[string]string {
 	parameters := make(map[string]string)
-	canary := "wrtqva"
 	doc.Find("input").Each(func(index int, item *goquery.Selection) {
 		name, ok := item.Attr("name")
 
 		if ok && len(name) > 0 && len(name) < 20 {
-			parameters[name] = canary + util.RandSeq(5)
+			parameters[name] = util.RandSeq(10)
 		}
 	})
 
 	wordlist = keywordsFromRegex(doc, wordlist)
 
 	for _, word := range *wordlist {
-		parameters[word] = canary + util.RandSeq(5)
+		parameters[word] = util.RandSeq(10)
 	}
 
 	return parameters
