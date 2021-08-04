@@ -54,8 +54,14 @@ func main() {
 	jar := sessionManager.ReadCookieJson(*cookieFile)
 	client := scanhttp.BuildHttpClient(jar)
 	urls := make(chan string)
+	var lines []string
 
 	s := bufio.NewScanner(os.Stdin)
+
+	for s.Scan() {
+		lines = util.AppendIfMissing(lines, s.Text())
+		scanInfo.ScanResults[s.Text()] = &scan.URLInfo{}
+	}
 
 	for i := 0; i < *threads; i++ {
 		wg.Add(1)
@@ -64,13 +70,11 @@ func main() {
 	}
 
 	if *url != "" {
-		scanInfo.ScanResults[*url] = &scan.URLInfo{}
 		urls <- *url
 	}
 
-	for s.Scan() {
-		scanInfo.ScanResults[s.Text()] = &scan.URLInfo{}
-		urls <- s.Text()
+	for _, rawUrl := range lines {
+		urls <- rawUrl
 	}
 
 	close(urls)
@@ -323,7 +327,7 @@ func findPotentialParameters(doc *goquery.Document, wordlist *[]string) map[stri
 
 func keywordsFromRegex(doc *goquery.Document, wordlist *[]string) *[]string {
 	html, err := doc.Html()
-	var newWordlist []string
+	var newWordlist []string = *wordlist
 
 	if err != nil {
 		fmt.Printf("Error reading doc: %s\n", err)
