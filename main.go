@@ -163,22 +163,7 @@ func findParameters(urls chan string, client *http.Client, wg *sync.WaitGroup, s
 ***********************************************************************************/
 
 func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) []string {
-	req, err := http.NewRequest("GET", rawUrl, nil)
-	if err != nil {
-		fmt.Printf("Error creating request: %s\n", err)
-		return []string{}
-	}
-	req.Header.Set("Connection", "close")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("Error executing request: %s\n", err)
-		return []string{}
-	}
-
 	foundParams := []string{}
-
-	defer resp.Body.Close()
 
 	queryStrings :=
 		splitParametersIntoMaxSize(
@@ -209,33 +194,35 @@ func confirmParameters(client *http.Client, rawUrl string, scanInfo *scan.Scan) 
 
 		doc, err := scanhttp.GetDocFromURL(parsedUrl.String(), client)
 
-		if err != nil {
-			fmt.Printf("Error creating document %s\n", err)
-			continue
+		pageDifferent := false
+
+		if err != nil || doc == nil {
+			pageDifferent = true
 		}
 
-		if doc != nil {
-			pageDifferent := reflectedscanner.CheckDocForReflections(doc, scanInfo.ScanResults[rawUrl], scanInfo, paramValues, rawUrl)
+		if !pageDifferent {
+			pageDifferent = reflectedscanner.CheckDocForReflections(doc, scanInfo.ScanResults[rawUrl], scanInfo, paramValues, rawUrl)
+		}
 
-			if pageDifferent {
-				util.DeleteByKey(&paramValues, scanInfo.CanaryValue)
-				if len(paramValues) == 1 {
-					for param := range paramValues {
-						found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
-						oldFinds := (scanInfo.JsonResults)[rawUrl]
-						found = util.AppendIfMissing(oldFinds.Params, param)
-						scanInfo.JsonResults[rawUrl] = scan.JsonResult{Params: found}
-						return []string{param}
-					}
-				} else if len(paramValues) > 0 {
-					extraParams := splitAndScan(paramValues, scanInfo, rawUrl, client)
-					foundParams = append(foundParams, extraParams...)
+		if pageDifferent {
+			util.DeleteByKey(&paramValues, scanInfo.CanaryValue)
+			if len(paramValues) == 1 {
+				for param := range paramValues {
+					found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
+					oldFinds := (scanInfo.JsonResults)[rawUrl]
+					found = util.AppendIfMissing(oldFinds.Params, param)
+					scanInfo.JsonResults[rawUrl] = scan.JsonResult{Params: found}
+					return []string{param}
 				}
+			} else if len(paramValues) > 0 {
+				extraParams := splitAndScan(paramValues, scanInfo, rawUrl, client)
+				foundParams = append(foundParams, extraParams...)
 			}
-
-			found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
-			foundParams = append(found, foundParams...)
 		}
+
+		found := scanInfo.ScanResults[rawUrl].ReflectedScan.FoundParameters
+		foundParams = append(found, foundParams...)
+
 	}
 
 	return foundParams
