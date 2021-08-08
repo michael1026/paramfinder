@@ -237,6 +237,7 @@ func splitAndScan(paramValues map[string]string, scanInfo *scan.Scan, rawUrl str
 		newScan.FillDefaults()
 		newScan.CanaryValue = scanInfo.CanaryValue
 		newScan.ScanResults[rawUrl] = &scan.URLInfo{}
+		newScan.ScanResults[rawUrl].MaxParams = scanInfo.ScanResults[rawUrl].MaxParams
 		newScan.ScanResults[rawUrl].ReflectedScan = &scan.ReflectedScan{}
 		newScan.ScanResults[rawUrl].ReflectedScan.CanaryCount = scanInfo.ScanResults[rawUrl].ReflectedScan.CanaryCount
 		newScan.ScanResults[rawUrl].ReflectedScan.Stable = true
