@@ -325,16 +325,15 @@ func keywordsFromRegex(doc *goquery.Document, wordlist *[]string) *[]string {
 
 	for _, regex := range regexs {
 		re := regexp.MustCompile(regex)
-		matches := re.FindStringSubmatch(html)
+		matches := re.FindAllStringSubmatch(html, -1)
 
 		for _, match := range matches {
-			match = strings.ReplaceAll(match, "\"", "")
-			match = strings.ReplaceAll(match, "{", "")
-			match = strings.ReplaceAll(match, ":", "")
-			match = strings.ReplaceAll(match, " ", "")
-
-			if match != "" {
-				newWordlist = util.AppendIfMissing(*wordlist, match)
+			word := strings.ReplaceAll(match[0], "\"", "")
+			word = strings.ReplaceAll(word, "{", "")
+			word = strings.ReplaceAll(word, ":", "")
+			word = strings.ReplaceAll(word, " ", "")
+			if word != "" {
+				newWordlist = util.AppendIfMissing(*wordlist, word)
 			}
 		}
 	}
